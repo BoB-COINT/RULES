@@ -1,0 +1,21 @@
+rule_id: STE0201.1
+name: Total LP Pull
+version: 2.0.0
+source: STE0200
+description: Detect full removal of liquidity via a single burn or rapid sequence of burns within a short interval.
+detection_type: total_lp_pull
+parameters:
+  window_seconds: 5
+  min_burn_frac: 0.95
+  min_step_burn_frac: 0.35
+  min_total_drop_frac: 0.95
+  min_sequence_windows: 2
+  max_sequence_windows: 5
+  max_sequence_span_seconds: 120
+scoring:
+  score_per_hit: 81.0
+  detection_threshold: 80.0
+  decay_per_window: 0.0
+evidence:
+  lookback_windows: 12
+  qualitative_reason: "Liquidity supply was fully removed within the configured monitoring window."
