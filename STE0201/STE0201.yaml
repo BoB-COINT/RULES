@@ -1,7 +1,7 @@
 rule_id: STE0201
 name: Hard LP Pull
-description: Detect major rapid liquidity removal via a single burn or a short burst of burns.
-version: 3.0.0
+description: Detect major rapid liquidity removal via a single burn or a short burst of burns while filtering for non-malicious liquidity management activity.
+version: 4.0.0
 source: STE0200
 detection_type: total_lp_pull
 parameters:
@@ -12,6 +12,10 @@ parameters:
   min_sequence_windows: 2
   max_sequence_windows: 5
   max_sequence_span_seconds: 120
+  min_context_burn_events: 1
+  min_burn_to_mint_ratio: 3.0
+  min_time_since_last_mint_sec: 300
+  min_peak_drop_frac: 0.6
 scoring:
   base_score: 72.0
   bonus_weight: 22.0
@@ -19,4 +23,4 @@ scoring:
   decay_per_window: 0.0
 evidence:
   lookback_windows: 12
-  qualitative_reason: "Liquidity supply fell sharply within the monitoring interval."
+  qualitative_reason: "Liquidity supply collapsed without replenishment or recent mint activity."
