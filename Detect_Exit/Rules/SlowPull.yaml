@@ -1,0 +1,31 @@
+rule_id: STE0202
+name: Slow LP Pull (Soft Rug)
+version: 2.0.0
+source: STE0200
+description: >
+  Detects gradual and sustained liquidity withdrawal indicative of soft/slow rug pulls,
+  distinguished from Hard LP Pull by the absence of any single-window sharp drop.
+detection_type: slow_drain
+parameters:
+  window_seconds: 600
+  min_consecutive_windows: 4
+  min_window_drop_frac: 0.02
+  min_cum_drawdown: 0.60
+  max_window_drop_frac: 0.50
+  max_peak_drop_frac: 0.60
+  max_price_ratio_change: 0.30
+  min_burn_events: 2
+  burn_to_mint_ratio: 2.0
+  min_burn_to_mint_ratio: 2.0
+  min_lp_tx_ratio: 0.10
+  min_swap_activity: 0.05
+  min_time_since_last_mint_sec: 1800
+  min_time_since_last_mint: 1800
+scoring:
+  base_score: 55.0
+  bonus_weight: 35.0
+  detection_threshold: 80.0
+  decay_per_window: 0.0
+evidence:
+  lookback_windows: 24
+  qualitative_reason: "LP supply declined steadily without replacement, burn activity dominated mints, and activity persisted without abrupt crashes."

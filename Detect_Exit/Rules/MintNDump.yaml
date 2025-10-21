@@ -1,0 +1,31 @@
+rule_id: STE0302
+name: Mint-and-Dump Liquidity Attack
+description: Detect concentrated token mints that move into the pair contract followed by outsized swap sells that drain reserves.
+version: 1.0.0
+source: STE0300
+detection_type: mint_and_dump
+parameters:
+  window_seconds: 60
+  holder_snapshot_lag_sec: 900
+  min_top_holder_supply_pct: 0.10
+  min_pair_contract_supply_pct: 0.0
+  min_single_holder_supply_pct: 0.10
+  min_top20_cum_supply_pct: 0.15
+  min_recent_mint_supply_ratio: 0.0
+  max_mint_to_dump_delay_sec: 1800
+  min_dump_swap_count: 1
+  dump_window_span_seconds: 180
+  min_dump_sell_tot_supply_ratio: 0.0
+  min_dump_sell_to_reserve_ratio: 0.03
+  min_dump_sell_abs: 1000000
+  min_dump_to_mint_ratio: 0.10
+  min_quote_value_extracted: 1.0
+  min_severity_threshold: 0.10
+scoring:
+  base_score: 78.0
+  bonus_weight: 22.0
+  detection_threshold: 80.0
+  decay_per_window: 0.0
+evidence:
+  lookback_windows: 18
+  qualitative_reason: "Token supply sits with one or the pair holder before large swaps dump >60% of reserves shortly after the mint."
