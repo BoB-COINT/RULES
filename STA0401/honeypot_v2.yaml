@@ -1,0 +1,30 @@
+rule_id: STA0401
+name: Honeypot
+description: Detect honeypot patterns via multi-metric feature thresholds such as sell block, imbalance, and privileged behavior.
+version: 2.0.0
+source: STA0401
+detection_type: honeypot_behavior
+
+parameters:
+  window_seconds: 5
+  min_consecutive_sell_fail_windows: 1       # 연속 매도 실패 구간 (3 → 1)
+  min_total_buy_cnt: 30                      # 해당 구간에서의 총 매수 횟수
+  min_imbalance_rate: 0.7                    # 매수-매도 비대칭성 (0.85 → 0.7)
+  min_approval_to_sell_ratio: 5.0            # 승인 대비 매도 빈도 비율 (8.0 → 5.0)
+  min_failed_sell_proxy_frac: 0.5            # 실패한 매도 비율
+  min_max_sell_share: 0.7                    # 한 주소의 매도 집중도
+  privileged_event_flag_value: 1             # 특권 이벤트 발생 플래그
+  router_only_sell_proxy_value: 1            # 라우터만 매도 가능한 경우
+  min_liquidity_event_context: 1             # 유동성 이벤트 발생 수 (참고용)
+
+scoring:
+  base_score: 70.0
+  bonus_weight: 30.0                         # 보너스 가중치 (25.0 → 30.0)
+  detection_threshold: 73.0                  # 탐지 임계값 (80.0 → 75.0)
+  decay_per_window: 0.0
+
+evidence:
+  lookback_windows: 12
+  qualitative_reason: 
+    "Continuous sell failures, strong buy imbalance, and privileged behavior 
+    suggest a honeypot-style token with blocked sells or whitelisted transfer logic."
