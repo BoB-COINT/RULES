@@ -33,6 +33,7 @@ def evaluate_rule_sta0401(df: pd.DataFrame, rule: dict) -> pd.DataFrame:
 
     p = rule["parameters"]
     s = rule["scoring"]
+    v = rule.get("validation", {})  # ⭐ validation 섹션 읽기 (없으면 빈 dict)
 
     # 각 조건 충족 여부 계산
     cond_sell_fail = df["consecutive_sell_fail_windows"] >= p["min_consecutive_sell_fail_windows"]
@@ -94,13 +95,35 @@ def evaluate_rule_sta0401(df: pd.DataFrame, rule: dict) -> pd.DataFrame:
         lambda x: "high" if x >= 90 else ("medium" if x >= 80 else "low")
     )
 
+    # ⭐ YAML validation 섹션 적용
+    min_buy_count = v.get("min_buy_count", 0)
+    
+    if min_buy_count > 0:
+        # Buy count가 min_buy_count 미만이고 Sell은 있는 경우 제외
+        invalid_pattern = (df['total_buy_cnt'] < min_buy_count) & (df['total_sell_cnt'] > 0)
+        
+        if invalid_pattern.any():
+            excluded_tokens = df[invalid_pattern]['token_addr_idx'].tolist() if 'token_addr_idx' in df.columns else []
+            print(f"\n[INFO] ⚠️  Validation filter applied:")
+            print(f"        Excluding {invalid_pattern.sum()} tokens with buy_count < {min_buy_count}")
+            print(f"        (Likely Dump/Exit Scam, not Honeypot)")
+            if excluded_tokens:
+                print(f"        Excluded Token IDs: {excluded_tokens}")
+            
+            # 탐지에서 제외
+            df.loc[invalid_pattern, 'detected'] = False
+            df.loc[invalid_pattern, 'severity'] = 'excluded'
+
     print(f"\n[INFO] Detection evaluation complete. {df['detected'].sum()} tokens flagged.")
     
     # 점수가 높은 상위 토큰 출력
     if len(df) > 0:
         print("\n[DEBUG] Top 5 tokens by score:")
-        top_tokens = df.nlargest(5, 'score')[['token_address', 'score', 'bonus_hits', 'detected']] if 'token_address' in df.columns else df.nlargest(5, 'score')[['score', 'bonus_hits', 'detected']]
-        print(top_tokens)
+        if 'token_addr_idx' in df.columns:
+            top_tokens = df.nlargest(5, 'score')[['token_addr_idx', 'score', 'bonus_hits', 'detected', 'severity']]
+        else:
+            top_tokens = df.nlargest(5, 'score')[['score', 'bonus_hits', 'detected']]
+        print(top_tokens.to_string(index=False))
     
     return df
 
