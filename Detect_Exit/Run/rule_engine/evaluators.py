@@ -1114,17 +1114,12 @@ def evaluate_mint_and_dump(
     min_top20_holder = Decimal(str(params.get("min_top20_cum_supply_pct", 0)))
     holder_snapshot_limit = float(params.get("holder_snapshot_lag_sec", 0) or 0)
 
-    min_recent_mint_ratio = Decimal(str(params.get("min_recent_mint_supply_ratio", 0)))
-    max_mint_to_dump_delay = float(params.get("max_mint_to_dump_delay_sec", 0) or 0)
-
-    min_dump_swaps = int(params.get("min_dump_swap_count", 0) or 0)
-    max_dump_span = float(params.get("dump_window_span_seconds", 0) or 0)
-    min_dump_supply_ratio = Decimal(str(params.get("min_dump_sell_tot_supply_ratio", 0)))
-    min_dump_reserve_ratio = Decimal(str(params.get("min_dump_sell_to_reserve_ratio", 0)))
-    min_dump_abs = Decimal(str(params.get("min_dump_sell_abs", 0)))
-    min_dump_to_mint_ratio = Decimal(str(params.get("min_dump_to_mint_ratio", 0)))
+    min_sell_swaps = int(params.get("min_sell_swap_count", 0) or 0)
+    max_sell_span = float(params.get("sell_window_span_seconds", 0) or 0)
+    min_sell_reserve_ratio = Decimal(str(params.get("min_sell_to_reserve_ratio", 0)))
+    min_sell_abs = Decimal(str(params.get("min_sell_base_abs", 0)))
     min_quote_value = Decimal(str(params.get("min_quote_value_extracted", 0)))
-    min_severity_threshold = Decimal(str(params.get("min_severity_threshold", min_dump_reserve_ratio)))
+    min_severity_threshold = Decimal(str(params.get("min_severity_threshold", min_sell_reserve_ratio)))
 
     base_score = float(scoring.get("base_score", 0))
     bonus_weight = float(scoring.get("bonus_weight", 0))
@@ -1154,20 +1149,11 @@ def evaluate_mint_and_dump(
             "holder_top1_supply_pct": decimal_to_float(window.holder_top1_supply_pct),
             "holder_pair_supply_pct": decimal_to_float(window.holder_pair_supply_pct),
             "holder_top20_supply_pct": decimal_to_float(window.holder_top20_supply_pct),
-            "holder_single_max_pct": decimal_to_float(window.holder_single_max_pct),
-            "holder_entropy": decimal_to_float(window.holder_entropy),
-            "holder_snapshot_lag_sec": window.holder_snapshot_lag_sec,
-            "mint_event_count": window.mint_event_count,
-            "mint_to_pair_supply_ratio": decimal_to_float(window.mint_to_pair_supply_ratio),
-            "mint_to_pair_amount": decimal_to_float(window.mint_to_pair_amount),
-            "dump_swap_count": window.dump_swap_count,
-            "dump_sell_tot_supply_ratio": decimal_to_float(window.dump_sell_tot_supply_ratio),
-            "dump_sell_to_reserve_max_ratio": decimal_to_float(window.dump_sell_to_reserve_max_ratio),
-            "dump_sell_abs_max": decimal_to_float(window.dump_sell_abs_max),
-            "dump_quote_out_volume": decimal_to_float(window.dump_quote_out_volume),
-            "dump_window_span_seconds": window.dump_window_span_seconds,
-            "mint_to_dump_latency_sec": window.mint_to_dump_latency_sec,
-            "dump_to_mint_ratio": decimal_to_float(window.dump_to_mint_ratio),
+            "sell_swap_count": window.sell_swap_count,
+            "sell_to_reserve_max_ratio": decimal_to_float(window.sell_to_reserve_max_ratio),
+            "sell_base_abs_max": decimal_to_float(window.sell_base_abs_max),
+            "sell_quote_volume": decimal_to_float(window.sell_quote_volume),
+            "sell_window_span_seconds": window.sell_window_span_seconds,
             "triggered": False,
         }
 
@@ -1205,19 +1191,18 @@ def evaluate_mint_and_dump(
                     f"holder_pair_supply_pct {float(pair_share):.3f} >= {float(min_pair_holder):.3f}"
                 )
 
-        single_max = window.holder_single_max_pct
         if min_single_holder > 0:
-            if single_max is None:
-                reason_parts.append("holder_single_max_pct unavailable")
+            if top1_share is None:
+                reason_parts.append("holder_top1_supply_pct unavailable (single holder check)")
                 holder_ok = False
-            elif single_max < min_single_holder:
+            elif top1_share < min_single_holder:
                 reason_parts.append(
-                    f"holder_single_max_pct {float(single_max):.3f} < {float(min_single_holder):.3f}"
+                    f"holder_top1_supply_pct {float(top1_share):.3f} < {float(min_single_holder):.3f} (single-holder requirement)"
                 )
                 holder_ok = False
             else:
                 reason_parts.append(
-                    f"holder_single_max_pct {float(single_max):.3f} >= {float(min_single_holder):.3f}"
+                    f"holder_top1_supply_pct {float(top1_share):.3f} >= {float(min_single_holder):.3f} (single-holder requirement)"
                 )
 
         top20_sum = window.holder_top20_supply_pct
@@ -1235,121 +1220,67 @@ def evaluate_mint_and_dump(
                     f"holder_top20_supply_pct {float(top20_sum):.3f} >= {float(min_top20_holder):.3f}"
                 )
 
-        if holder_snapshot_limit > 0:
-            lag_value = window.holder_snapshot_lag_sec
-            if lag_value is None:
-                reason_parts.append("holder_snapshot_lag_sec unavailable")
-            elif lag_value > holder_snapshot_limit:
-                reason_parts.append(
-                    f"holder_snapshot_lag_sec {lag_value:.0f}s > {holder_snapshot_limit:.0f}s"
-                )
-                holder_ok = False
-            else:
-                reason_parts.append(
-                    f"holder_snapshot_lag_sec {lag_value:.0f}s <= {holder_snapshot_limit:.0f}s"
-                )
+        pair_share = window.holder_pair_supply_pct
+
+    # holder_snapshot_limit currently unused because feature set does not track snapshot lag
 
         holder_violation = 0.0
         for holder_value in (
             window.holder_top1_supply_pct,
-            window.holder_pair_supply_pct,
-            window.holder_single_max_pct,
         ):
             if holder_value is None:
                 continue
-            if holder_value > 1:
-                holder_violation = max(holder_violation, min(float(holder_value - 1), 1.0))
-
-        mint_ok = True
-        mint_ratio = window.mint_to_pair_supply_ratio
-        if min_recent_mint_ratio > 0:
-            if mint_ratio is None:
-                reason_parts.append("mint_to_pair_supply_ratio unavailable")
-                mint_ok = False
-            elif mint_ratio < min_recent_mint_ratio:
-                reason_parts.append(
-                    f"mint_to_pair_supply_ratio {float(mint_ratio):.3f} < {float(min_recent_mint_ratio):.3f}"
-                )
-                mint_ok = False
-            else:
-                reason_parts.append(
-                    f"mint_to_pair_supply_ratio {float(mint_ratio):.3f} >= {float(min_recent_mint_ratio):.3f}"
-                )
+            if holder_value > 100:
+                overage = (holder_value - 100) / 100
+                holder_violation = max(holder_violation, min(float(overage), 1.0))
 
         dump_ok = True
 
-        if min_dump_swaps > 0:
-            if window.dump_swap_count < min_dump_swaps:
+        if min_sell_swaps > 0:
+            if window.sell_swap_count < min_sell_swaps:
                 reason_parts.append(
-                    f"dump_swap_count {window.dump_swap_count} < {min_dump_swaps}"
+                    f"sell_swap_count {window.sell_swap_count} < {min_sell_swaps}"
                 )
                 dump_ok = False
             else:
                 reason_parts.append(
-                    f"dump_swap_count {window.dump_swap_count} >= {min_dump_swaps}"
+                    f"sell_swap_count {window.sell_swap_count} >= {min_sell_swaps}"
                 )
 
-        dump_span = window.dump_window_span_seconds
-        if max_dump_span > 0:
-            if dump_span is None:
-                reason_parts.append("dump_window_span_seconds unavailable")
-                dump_ok = False
-            elif dump_span > max_dump_span:
-                reason_parts.append(
-                    f"dump_window_span_seconds {dump_span:.0f}s > {max_dump_span:.0f}s"
-                )
-                dump_ok = False
-            else:
-                reason_parts.append(
-                    f"dump_window_span_seconds {dump_span:.0f}s <= {max_dump_span:.0f}s"
-                )
+        if max_sell_span > 0:
+            reason_parts.append("dump_window_span_seconds check skipped (field unavailable)")
 
-        dump_supply_ratio = window.dump_sell_tot_supply_ratio
-        if min_dump_supply_ratio > 0:
-            if dump_supply_ratio is None:
-                reason_parts.append("dump_sell_tot_supply_ratio unavailable")
-                dump_ok = False
-            elif dump_supply_ratio < min_dump_supply_ratio:
-                reason_parts.append(
-                    f"dump_sell_tot_supply_ratio {float(dump_supply_ratio):.3f} < {float(min_dump_supply_ratio):.3f}"
-                )
-                dump_ok = False
-            else:
-                reason_parts.append(
-                    f"dump_sell_tot_supply_ratio {float(dump_supply_ratio):.3f} >= {float(min_dump_supply_ratio):.3f}"
-                )
-
-        dump_reserve_ratio = window.dump_sell_to_reserve_max_ratio
-        if min_dump_reserve_ratio > 0:
+        dump_reserve_ratio = window.sell_to_reserve_max_ratio
+        if min_sell_reserve_ratio > 0:
             if dump_reserve_ratio is None:
                 reason_parts.append("dump_sell_to_reserve_max_ratio unavailable")
                 dump_ok = False
-            elif dump_reserve_ratio < min_dump_reserve_ratio:
+            elif dump_reserve_ratio < min_sell_reserve_ratio:
                 reason_parts.append(
-                    f"dump_sell_to_reserve_max_ratio {float(dump_reserve_ratio):.3f} < {float(min_dump_reserve_ratio):.3f}"
+                    f"dump_sell_to_reserve_max_ratio {float(dump_reserve_ratio):.3f} < {float(min_sell_reserve_ratio):.3f}"
                 )
                 dump_ok = False
             else:
                 reason_parts.append(
-                    f"dump_sell_to_reserve_max_ratio {float(dump_reserve_ratio):.3f} >= {float(min_dump_reserve_ratio):.3f}"
+                    f"dump_sell_to_reserve_max_ratio {float(dump_reserve_ratio):.3f} >= {float(min_sell_reserve_ratio):.3f}"
                 )
 
-        dump_abs = window.dump_sell_abs_max
-        if min_dump_abs > 0:
+        dump_abs = window.sell_base_abs_max
+        if min_sell_abs > 0:
             if dump_abs is None:
                 reason_parts.append("dump_sell_abs_max unavailable")
                 dump_ok = False
-            elif dump_abs < min_dump_abs:
+            elif dump_abs < min_sell_abs:
                 reason_parts.append(
-                    f"dump_sell_abs_max {float(dump_abs):.3f} < {float(min_dump_abs):.3f}"
+                    f"dump_sell_abs_max {float(dump_abs):.3f} < {float(min_sell_abs):.3f}"
                 )
                 dump_ok = False
             else:
                 reason_parts.append(
-                    f"dump_sell_abs_max {float(dump_abs):.3f} >= {float(min_dump_abs):.3f}"
+                    f"dump_sell_abs_max {float(dump_abs):.3f} >= {float(min_sell_abs):.3f}"
                 )
 
-        quote_value = window.dump_quote_out_volume
+        quote_value = window.sell_quote_volume
         if min_quote_value > 0:
             if quote_value is None:
                 reason_parts.append("dump_quote_out_volume unavailable")
@@ -1364,44 +1295,13 @@ def evaluate_mint_and_dump(
                     f"dump_quote_out_volume {float(quote_value):.3f} >= {float(min_quote_value):.3f}"
                 )
 
-        mint_latency = window.mint_to_dump_latency_sec
-        if max_mint_to_dump_delay > 0:
-            if mint_latency is None:
-                reason_parts.append("mint_to_dump_latency_sec unavailable")
-                dump_ok = False
-            elif mint_latency > max_mint_to_dump_delay:
-                reason_parts.append(
-                    f"mint_to_dump_latency_sec {mint_latency:.0f}s > {max_mint_to_dump_delay:.0f}s"
-                )
-                dump_ok = False
-            else:
-                reason_parts.append(
-                    f"mint_to_dump_latency_sec {mint_latency:.0f}s <= {max_mint_to_dump_delay:.0f}s"
-                )
-
-        dump_to_mint_ratio_value = window.dump_to_mint_ratio
-        if min_dump_to_mint_ratio > 0:
-            if dump_to_mint_ratio_value is None:
-                reason_parts.append("dump_to_mint_ratio unavailable")
-                dump_ok = False
-            elif dump_to_mint_ratio_value < min_dump_to_mint_ratio:
-                reason_parts.append(
-                    f"dump_to_mint_ratio {float(dump_to_mint_ratio_value):.3f} < {float(min_dump_to_mint_ratio):.3f}"
-                )
-                dump_ok = False
-            else:
-                reason_parts.append(
-                    f"dump_to_mint_ratio {float(dump_to_mint_ratio_value):.3f} >= {float(min_dump_to_mint_ratio):.3f}"
-                )
-
-        all_conditions_met = holder_ok and mint_ok and dump_ok
+        all_conditions_met = holder_ok and dump_ok
         entry["_reason_parts"] = reason_parts
         entry["triggered"] = all_conditions_met
 
         if all_conditions_met:
             reserve_ratio_val = decimal_to_float(dump_reserve_ratio) or 0.0
-            supply_ratio_val = decimal_to_float(dump_supply_ratio) or 0.0
-            severity_value = max(severity_value, reserve_ratio_val, supply_ratio_val)
+            severity_value = max(severity_value, reserve_ratio_val)
             if holder_violation > 0:
                 severity_value = max(severity_value, holder_violation)
 
