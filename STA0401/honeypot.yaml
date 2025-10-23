@@ -1,0 +1,64 @@
+rule_id: STA0401.v8.tl
+name: Honeypot (Token-level tuned)
+version: 2.1.2
+source: STA0401
+detection_type: honeypot_behavior
+
+parameters:
+  # A버킷: 현재 데이터에선 max=2라서 3은 항상 실패 → 2로 낮춰 A버킷을 살림
+  min_consecutive_sell_fail_windows: 2       # 3 → 2
+  # 활동 충분성↑
+  min_total_buy_cnt: 100                     # 50 → 100
+  # 불균형 더 빡세게
+  min_imbalance_rate: 0.90                   # 0.85 → 0.90
+  # 승인 대비 매도 비율 더 타이트
+  min_approval_to_sell_ratio: 15.0           # 8.0 → 15.0
+  # 매도 집중도 더 타이트 (0.7이면 10개나 통과)
+  min_max_sell_share: 0.90                   # 0.70 → 0.90
+  # 활동 창 수
+  min_windows_with_activity: 8               # 5 → 8
+  # 실패 매도 프락션(데이터상 전부 0이라 영향 미미하지만, 키는 유지)
+  min_failed_sell_proxy_frac: 0.50
+
+scoring:
+  base_score: 70.0
+  detection_threshold: 80.0                  # 75.0 → 80.0 (한 클릭 상향)
+  decay_per_window: 0.0
+  buckets:
+    A_sell_block:
+      weight: 45.0
+      all:
+        - consecutive_sell_fail_windows >= params.min_consecutive_sell_fail_windows
+        - total_buy_cnt >= params.min_total_buy_cnt
+        - imbalance_rate >= params.min_imbalance_rate
+        - approval_to_sell_ratio >= params.min_approval_to_sell_ratio
+    B_owner_only_trade:
+      weight: 25.0
+      all:
+        - max_sell_share >= params.min_max_sell_share
+    C_privileged_router_bias:
+      weight: 20.0
+      any:
+        - privileged_event_flag == 1
+        - router_only_sell_proxy == 1
+    D_activity_sanity:
+      weight: 10.0
+      all:
+        - windows_with_activity >= params.min_windows_with_activity
+
+evidence:
+  lookback_windows: 12
+  include:
+    - token_addr_idx
+    - consecutive_sell_fail_windows
+    - total_buy_cnt
+    - total_sell_cnt
+    - imbalance_rate
+    - approval_to_sell_ratio
+    - max_sell_share
+    - privileged_event_flag
+    - router_only_sell_proxy
+    - windows_with_activity
+
+validation:
+  min_buy_count: 1
