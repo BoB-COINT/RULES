@@ -1,22 +1,15 @@
-import os
 from web3 import Web3
 import json
 import csv
 import sys
 import module.TokenContEventParser as TokenContEventParser
 
-ETHERSCAN_KEY = os.getenv("ETHERSCAN_KEY")
-ALCHEMY_KEY = os.getenv("ALCHEMY_KEY")
+ETHERSCAN_KEY = 'API_KEY'
 API_URL = 'https://api.etherscan.io/v2/api'
+ALCHEMY_KEY = 'API_KEY'
 LIMIT_NUM = 10000 # 최대 수집 Token 수   
 
-if not ETHERSCAN_KEY or not ALCHEMY_KEY:
-    print("[!] Please Input Your API Key via environment variables:")
-    print("    export ETHERSCAN_KEY=xxxx")
-    print("    export ALCHEMY_KEY=xxxx")
-    sys.exit(1)
-
-if ALCHEMY_KEY == 'ALCHEMY_KEY' or ETHERSCAN_KEY == 'ETHERSCAN_KEY':
+if ALCHEMY_KEY == 'API_KEY' or ETHERSCAN_KEY == 'API_KEY':
     print('[!] Please Input Your API Key')
     sys.exit(1)
 
