@@ -141,7 +141,7 @@ generate_features_0401_v8.py
 - `features.csv` 스키마
 | 컬럼 |
 |---|
-| { token_addr_idx, consecutive_sell_fail_windows, total_buy_cnt, total_sell_cnt, total_owner_sell_cnt, total_non_owner_sell_cnt, owner_sell_ratio, total_approval_cnt, imbalance_rate, approval_to_sell_ratio, privileged_event_flag, router_only_sell_proxy, total_windows, windows_with_activity, total_burn_events, total_mint_events, s_owner_count, total_sell_vol, total_owner_sell_vol, owner_sell_vol_ratio, router_approval_rate, max_sell_share, max_sell_addr } |
+| { token_addr_idx, total_buy_cnt, total_sell_cnt, total_owner_sell_cnt, total_non_owner_sell_cnt, owner_sell_ratio, total_approval_cnt, imbalance_rate, approval_to_sell_ratio, total_windows, windows_with_activity, total_burn_events, total_mint_events, s_owner_count, total_sell_vol, total_owner_sell_vol, owner_sell_vol_ratio, router_approval_rate } |
 
 ---
 

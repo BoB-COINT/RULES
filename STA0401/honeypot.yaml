@@ -1,64 +1,49 @@
-rule_id: STA0401.v8.tl
-name: Honeypot (Token-level tuned)
-version: 2.1.2
+rule_id: STA0401.v8.tl             # 기존 ID 유지 (파이프라인 호환 목적)
+name: Honeypot (Token-level tuned, v10 features)
+version: 2.2.0                     # 버전업: v10 스키마 대응
 source: STA0401
 detection_type: honeypot_behavior
 
 parameters:
-  # A버킷: 현재 데이터에선 max=2라서 3은 항상 실패 → 2로 낮춰 A버킷을 살림
-  min_consecutive_sell_fail_windows: 2       # 3 → 2
-  # 활동 충분성↑
-  min_total_buy_cnt: 100                     # 50 → 100
-  # 불균형 더 빡세게
-  min_imbalance_rate: 0.90                   # 0.85 → 0.90
-  # 승인 대비 매도 비율 더 타이트
-  min_approval_to_sell_ratio: 15.0           # 8.0 → 15.0
-  # 매도 집중도 더 타이트 (0.7이면 10개나 통과)
-  min_max_sell_share: 0.90                   # 0.70 → 0.90
-  # 활동 창 수
-  min_windows_with_activity: 8               # 5 → 8
-  # 실패 매도 프락션(데이터상 전부 0이라 영향 미미하지만, 키는 유지)
-  min_failed_sell_proxy_frac: 0.50
+  # 핵심 신호(A)
+  min_imbalance_rate: 0.90              # 매수/매도 불균형(건수 기반)
+  min_approval_to_sell_ratio: 15.0      # 승인 대비 비오너 매도 희소성
+
+  # 활동 게이트(D) — run_rules.py에서 있으면 사용, 없으면 스킵
+  min_total_buy_cnt: 100
+  min_windows_with_activity: 8
 
 scoring:
-  base_score: 70.0
-  detection_threshold: 80.0                  # 75.0 → 80.0 (한 클릭 상향)
-  decay_per_window: 0.0
   buckets:
     A_sell_block:
-      weight: 45.0
+      weight: 80.0
       all:
-        - consecutive_sell_fail_windows >= params.min_consecutive_sell_fail_windows
-        - total_buy_cnt >= params.min_total_buy_cnt
+        # v10 실제 컬럼명 그대로 사용
         - imbalance_rate >= params.min_imbalance_rate
         - approval_to_sell_ratio >= params.min_approval_to_sell_ratio
-    B_owner_only_trade:
-      weight: 25.0
-      all:
-        - max_sell_share >= params.min_max_sell_share
-    C_privileged_router_bias:
-      weight: 20.0
-      any:
-        - privileged_event_flag == 1
-        - router_only_sell_proxy == 1
+
     D_activity_sanity:
-      weight: 10.0
+      weight: 20.0
       all:
+        # 존재하면 적용, 없으면 run_rules.py 쪽에서 자동 스킵됨
+        - total_buy_cnt >= params.min_total_buy_cnt
         - windows_with_activity >= params.min_windows_with_activity
 
 evidence:
   lookback_windows: 12
   include:
+    # 결과 JSON에 함께 노출하고 싶은 컬럼들(존재할 때만 포함됨)
     - token_addr_idx
-    - consecutive_sell_fail_windows
-    - total_buy_cnt
-    - total_sell_cnt
     - imbalance_rate
     - approval_to_sell_ratio
-    - max_sell_share
-    - privileged_event_flag
-    - router_only_sell_proxy
+    - total_buy_cnt
     - windows_with_activity
+    - total_sell_cnt
+    - total_non_owner_sell_cnt
+    - router_approval_rate
+    - owner_sell_ratio
+    - owner_sell_vol_ratio
 
 validation:
+  # 판매가 있는데 매수는 극단적으로 적은 비정상 데이터 제거용(옵션)
   min_buy_count: 1
