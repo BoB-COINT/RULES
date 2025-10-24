@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-generate_features_0401_v10.py  (pair-aware + fallback, slimmed columns)
+generate_features_0401_v10_slim.py  (pair-aware + fallback, slimmed columns)
 ─────────────────────────────────────────────────────────
-허니팟 토큰 탐지를 위한 Feature 추출 스크립트
+허니팟 토큰 탐지를 위한 Feature 추출 스크립트 (요청에 따라 특정 지표 제거판)
 - Transfer 기반 Buy/Sell (EOA ↔ Pair)
 - PairCreated.evt_log 에서 pairaddr 주입 (로더에서 확정)
 - pair_addr 비거나 부족 시 Transfer 패턴으로 페어 후보 추정 (폴백)
 - Approval 라우터 집계: evt_log.spender 파싱
 - S_owner: 최초 민팅 수령자 + LP 민터/버너(sender/to) + 첫번째 Approval 요청자
-- 전기간 매도 집중도: max_sell_share (global)
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, getcontext
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
 getcontext().prec = 28
 
@@ -77,8 +76,6 @@ class WindowFeature:
     approve_to_known_router_cnt: int
     unique_sellers: int
     unique_owner_sellers: int
-    privileged_event_flag: int
-    router_only_sell_proxy: int
     burn_events: int
     mint_events: int
     sync_events: int
@@ -87,7 +84,6 @@ class WindowFeature:
 @dataclass
 class TokenFeature:
     token_addr_idx: str
-    consecutive_sell_fail_windows: int
     total_buy_cnt: int
     total_sell_cnt: int
     total_owner_sell_cnt: int
@@ -96,8 +92,6 @@ class TokenFeature:
     total_approval_cnt: int
     imbalance_rate: float
     approval_to_sell_ratio: float
-    privileged_event_flag: int
-    router_only_sell_proxy: int
     total_windows: int
     windows_with_activity: int
     total_burn_events: int
@@ -107,9 +101,6 @@ class TokenFeature:
     total_owner_sell_vol: float
     owner_sell_vol_ratio: float
     router_approval_rate: float
-    # 전기간 매도 몰림(Global)
-    max_sell_share: float     # (기존 max_sell_share_global을 이름만 변경)
-    max_sell_addr: str
 
 # -------------------- 유틸 --------------------
 def parse_iso(v: str) -> datetime:
@@ -367,9 +358,6 @@ def generate_window_features(
                 if sp and sp in KNOWN_ROUTER_ADDRS:
                     approve_router += 1
 
-        privileged_flag = 1 if (buy_cnt>0 and sell_cnt==0 and approval_cnt>0) else 0
-        router_only_flag = 1 if (sell_cnt==0 and approval_cnt>0 and approve_router==approval_cnt) else 0
-
         burn_events = sum(1 for e in win_pair if e.evt_type=="burn")
         mint_events = sum(1 for e in win_pair if e.evt_type=="mint")
         sync_events = sum(1 for e in win_pair if e.evt_type=="sync")
@@ -383,8 +371,6 @@ def generate_window_features(
             approval_cnt=approval_cnt, unique_approvers=len(approvers),
             approve_to_known_router_cnt=approve_router,
             unique_sellers=len(sellers), unique_owner_sellers=len(owner_sellers),
-            privileged_event_flag=privileged_flag,
-            router_only_sell_proxy=router_only_flag,
             burn_events=burn_events, mint_events=mint_events,
             sync_events=sync_events, swap_events=swap_events
         ))
@@ -396,32 +382,6 @@ def generate_window_features(
         print(f"[DBG] token={token_id_for_log} buy_sum={tb} sell_sum={ts}")
     return result
 
-# -------------------- 전기간 매도 몰림(글로벌) --------------------
-def compute_global_sell_concentration(
-    token_evts: List[TokenEvent],
-    pair_evts: List[PairEvent]
-) -> Tuple[float, str]:
-    pair_addr_set: Set[str] = { (p.pair_addr or "") for p in pair_evts if p.pair_addr }
-    pair_addr_set = {x.lower() for x in pair_addr_set if x}
-    if len(pair_addr_set) == 0:
-        pair_addr_set |= infer_pair_addrs_from_transfers(token_evts)
-
-    sellers: Dict[str,int] = {}
-    total = 0
-    for e in token_evts:
-        if e.evt_type != "transfer": continue
-        frm = e.tx_from; to = e.tx_to
-        if to in pair_addr_set and frm and frm not in pair_addr_set:
-            sellers[frm] = sellers.get(frm, 0) + 1
-            total += 1
-
-    if total == 0 or not sellers:
-        return 0.0, ""
-
-    top_addr, top_cnt = max(sellers.items(), key=lambda x: x[1])
-    share = top_cnt / total
-    return float(share), top_addr
-
 # -------------------- 토큰 집계 --------------------
 def aggregate_to_token_feature(
     token_idx: str,
@@ -430,11 +390,6 @@ def aggregate_to_token_feature(
     token_evts: List[TokenEvent],
     pair_evts: List[PairEvent],
 ) -> TokenFeature:
-    consec = cur = 0
-    for w in windows:
-        is_fail = (w.approval_cnt>0) and (w.non_owner_sell_cnt==0) and (w.buy_cnt>0)
-        if is_fail: cur+=1; consec=max(consec,cur)
-        else: cur=0
 
     total_buy_cnt = sum(w.buy_cnt for w in windows)
     total_sell_cnt = sum(w.sell_cnt for w in windows)
@@ -451,9 +406,6 @@ def aggregate_to_token_feature(
 
     approval_to_sell_ratio = (total_approval_cnt/total_non_owner_sell_cnt) if total_non_owner_sell_cnt>0 else 99.0
 
-    privileged_event_flag = 1 if any(w.privileged_event_flag for w in windows) else 0
-    router_only_sell_proxy = 1 if any(w.router_only_sell_proxy for w in windows) else 0
-
     total_windows = len(windows)
     windows_with_activity = sum(1 for w in windows if (w.buy_cnt+w.sell_cnt+w.approval_cnt)>0)
     total_burn_events = sum(w.burn_events for w in windows)
@@ -468,12 +420,8 @@ def aggregate_to_token_feature(
     approve_to_router = sum(w.approve_to_known_router_cnt for w in windows)
     router_approval_rate = (approve_to_router/total_approval_cnt) if total_approval_cnt>0 else 0.0
 
-    # 전기간 매도 몰림(글로벌)
-    max_share, max_addr = compute_global_sell_concentration(token_evts, pair_evts)
-
     return TokenFeature(
         token_addr_idx=token_idx,
-        consecutive_sell_fail_windows=consec,
         total_buy_cnt=total_buy_cnt,
         total_sell_cnt=total_sell_cnt,
         total_owner_sell_cnt=total_owner_sell_cnt,
@@ -482,8 +430,6 @@ def aggregate_to_token_feature(
         total_approval_cnt=total_approval_cnt,
         imbalance_rate=imbalance_rate,
         approval_to_sell_ratio=approval_to_sell_ratio,
-        privileged_event_flag=privileged_event_flag,
-        router_only_sell_proxy=router_only_sell_proxy,
         total_windows=total_windows,
         windows_with_activity=windows_with_activity,
         total_burn_events=total_burn_events,
@@ -493,8 +439,6 @@ def aggregate_to_token_feature(
         total_owner_sell_vol=total_owner_sell_vol,
         owner_sell_vol_ratio=owner_sell_vol_ratio,
         router_approval_rate=router_approval_rate,
-        max_sell_share=max_share,     # 글로벌 점유율
-        max_sell_addr=max_addr,
     )
 
 # -------------------- 메인 --------------------
@@ -505,7 +449,7 @@ def main():
     OUTPUT_PATH       = BASE / "features.csv"
 
     print("="*60)
-    print("🚀 Honeypot Feature Extraction (robust pair-aware) Started")
+    print("🚀 Honeypot Feature Extraction (robust pair-aware, slim) Started")
     print("="*60)
 
     print("\n[1/4] Loading data...")
@@ -534,13 +478,12 @@ def main():
 
     print("\n[3/4] Saving features...")
     fieldnames = [
-        'token_addr_idx','consecutive_sell_fail_windows','total_buy_cnt','total_sell_cnt',
+        'token_addr_idx','total_buy_cnt','total_sell_cnt',
         'total_owner_sell_cnt','total_non_owner_sell_cnt','owner_sell_ratio','total_approval_cnt',
         'imbalance_rate','approval_to_sell_ratio',
-        'privileged_event_flag','router_only_sell_proxy','total_windows','windows_with_activity',
+        'total_windows','windows_with_activity',
         'total_burn_events','total_mint_events','s_owner_count',
-        'total_sell_vol','total_owner_sell_vol','owner_sell_vol_ratio','router_approval_rate',
-        'max_sell_share','max_sell_addr'  # 글로벌 기준
+        'total_sell_vol','total_owner_sell_vol','owner_sell_vol_ratio','router_approval_rate'
     ]
     with open(OUTPUT_PATH, "w", newline="", encoding="utf-8") as fp:
         w = csv.DictWriter(fp, fieldnames=fieldnames); w.writeheader()
@@ -552,15 +495,13 @@ def main():
     if feats:
         bc = [t.total_buy_cnt for t in feats]; sc = [t.total_sell_cnt for t in feats]
         orat = [t.owner_sell_ratio for t in feats]; sown = [t.s_owner_count for t in feats]
-        gmax = [t.max_sell_share for t in feats]
         print(f"  - Buy count range: {min(bc)} ~ {max(bc)}")
         print(f"  - Sell count range: {min(sc)} ~ {max(sc)}")
         print(f"  - Owner sell ratio: {min(orat):.2f} ~ {max(orat):.2f}")
         print(f"  - Avg S_owner count: {sum(sown)/len(sown):.1f}")
-        print(f"  - Global max sell share: {min(gmax):.2f} ~ {max(gmax):.2f}")
 
     print("\n" + "="*60)
-    print("✅ Feature extraction (robust pair-aware) completed successfully!")
+    print("✅ Feature extraction (slim) completed successfully!")
     print("="*60)
 
 if __name__ == "__main__":
