@@ -1,13 +1,28 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-generate_features_0401_v10_slim.py  (pair-aware + fallback, slimmed columns)
+generate_feature_v11.py  (pair-aware + fallback, with 4 new features)
 ─────────────────────────────────────────────────────────
-허니팟 토큰 탐지를 위한 Feature 추출 스크립트 (요청에 따라 특정 지표 제거판)
+허니팟 토큰 탐지를 위한 Feature 추출 스크립트 (v10-slim 확장판)
 - Transfer 기반 Buy/Sell (EOA ↔ Pair)
 - PairCreated.evt_log 에서 pairaddr 주입 (로더에서 확정)
 - pair_addr 비거나 부족 시 Transfer 패턴으로 페어 후보 추정 (폴백)
 - Approval 라우터 집계: evt_log.spender 파싱
 - S_owner: 최초 민팅 수령자 + LP 민터/버너(sender/to) + 첫번째 Approval 요청자
+
+▶ v11에서 추가된 토큰-레벨 피처
+  1) consecutive_sell_fail_windows :
+     - 정의(윈도우 기준): (buy_cnt>0) ∧ (approval_cnt>0) ∧ (non_owner_sell_cnt==0)
+     - 위 조건이 연속으로 나타난 윈도우 길이의 최댓값
+  2) failed_sell_cnt :
+     - 위 "sell-fail" 조건에 해당하는 윈도우의 총 개수
+  3) liquidity_event_mask :
+     - 전체 구간에서 한 번이라도 등장한 유동성 이벤트를 비트 마스크로 표현
+       bit0(MINT)=1, bit1(BURN)=2, bit2(SYNC)=4
+       예) MINT와 BURN만 있으면 1|2=3
+  4) max_sell_share :
+     - 전 구간에서 매도 전송(from: EOA, to: pair) 주체별 매도 건수 비율의 최댓값
+       = max_addr_sell_cnt / total_sell_cnt (분모 0이면 0.0)
 """
 
 from __future__ import annotations
@@ -80,6 +95,8 @@ class WindowFeature:
     mint_events: int
     sync_events: int
     swap_events: int
+    # v11 내부 계산 보조
+    sell_fail_flag: int  # (buy>0 and approval>0 and non_owner_sell_cnt==0)면 1, 아니면 0
 
 @dataclass
 class TokenFeature:
@@ -101,6 +118,11 @@ class TokenFeature:
     total_owner_sell_vol: float
     owner_sell_vol_ratio: float
     router_approval_rate: float
+    # v11 추가
+    consecutive_sell_fail_windows: int
+    failed_sell_cnt: int
+    liquidity_event_mask: int
+    max_sell_share: float
 
 # -------------------- 유틸 --------------------
 def parse_iso(v: str) -> datetime:
@@ -212,7 +234,7 @@ def load_token_events(path: Path) -> Dict[str, List[TokenEvent]]:
                     tx_from=tx_from,
                     tx_to=tx_to,
                     value=val,
-                    success=True,
+                    success=True,  # 입력에 실패 여부가 없다면 True로 둠
                     spender=spender
                 )
                 m.setdefault(token_idx, []).append(evt)
@@ -286,6 +308,13 @@ def infer_pair_addrs_from_transfers(token_evts: List[TokenEvent]) -> Set[str]:
         cands = topk(from_cnt) & topk(to_cnt)
     return {c for c in cands if c != ZERO_ADDR}
 
+def build_pair_addr_set(pair_evts: List[PairEvent], token_evts: List[TokenEvent]) -> Set[str]:
+    pair_addr_set: Set[str] = { (p.pair_addr or "") for p in pair_evts if p.pair_addr }
+    pair_addr_set = {x.lower() for x in pair_addr_set if x}
+    if len(pair_addr_set) == 0:
+        pair_addr_set |= infer_pair_addrs_from_transfers(token_evts)
+    return pair_addr_set
+
 # -------------------- 윈도우 집계 --------------------
 def generate_window_features(
     token_evts: List[TokenEvent],
@@ -294,10 +323,7 @@ def generate_window_features(
     s_owner: Set[str],
     token_id_for_log: str = "?"
 ) -> List[WindowFeature]:
-    pair_addr_set: Set[str] = { (p.pair_addr or "") for p in pair_evts if p.pair_addr }
-    pair_addr_set = {x.lower() for x in pair_addr_set if x}
-    if len(pair_addr_set) == 0:
-        pair_addr_set |= infer_pair_addrs_from_transfers(token_evts)
+    pair_addr_set = build_pair_addr_set(pair_evts, token_evts)
 
     if DEBUG:
         total_transfers = sum(1 for e in token_evts if e.evt_type=="transfer")
@@ -363,6 +389,9 @@ def generate_window_features(
         sync_events = sum(1 for e in win_pair if e.evt_type=="sync")
         swap_events = sum(1 for e in win_pair if e.evt_type=="swap")
 
+        # v11: "sell-fail" 윈도우 판단 플래그
+        sell_fail_flag = 1 if (buy_cnt > 0 and approval_cnt > 0 and non_owner_sell_cnt == 0) else 0
+
         result.append(WindowFeature(
             buy_cnt=buy_cnt, sell_cnt=sell_cnt,
             owner_sell_cnt=owner_sell_cnt, owner_sell_vol=owner_sell_vol,
@@ -372,7 +401,8 @@ def generate_window_features(
             approve_to_known_router_cnt=approve_router,
             unique_sellers=len(sellers), unique_owner_sellers=len(owner_sellers),
             burn_events=burn_events, mint_events=mint_events,
-            sync_events=sync_events, swap_events=swap_events
+            sync_events=sync_events, swap_events=swap_events,
+            sell_fail_flag=sell_fail_flag
         ))
         cur = nxt
 
@@ -381,6 +411,16 @@ def generate_window_features(
         ts = sum(w.sell_cnt for w in result)
         print(f"[DBG] token={token_id_for_log} buy_sum={tb} sell_sum={ts}")
     return result
+
+def longest_consecutive_ones(flags: List[int]) -> int:
+    best = cur = 0
+    for f in flags:
+        if f:
+            cur += 1
+            if cur > best: best = cur
+        else:
+            cur = 0
+    return best
 
 # -------------------- 토큰 집계 --------------------
 def aggregate_to_token_feature(
@@ -420,6 +460,30 @@ def aggregate_to_token_feature(
     approve_to_router = sum(w.approve_to_known_router_cnt for w in windows)
     router_approval_rate = (approve_to_router/total_approval_cnt) if total_approval_cnt>0 else 0.0
 
+    # v11: sell-fail 통계
+    sell_fail_flags = [w.sell_fail_flag for w in windows]
+    consecutive_sell_fail_windows = longest_consecutive_ones(sell_fail_flags)
+    failed_sell_cnt = sum(sell_fail_flags)
+
+    # v11: liquidity_event_mask (bit0: MINT, bit1: BURN, bit2: SYNC)
+    liquidity_event_mask = 0
+    if total_mint_events > 0: liquidity_event_mask |= 1
+    if total_burn_events > 0: liquidity_event_mask |= 2
+    if sum(w.sync_events for w in windows) > 0: liquidity_event_mask |= 4
+
+    # v11: max_sell_share 계산 (전 구간에서 매도 주소 점유율의 최댓값)
+    pair_addr_set = build_pair_addr_set(pair_evts, token_evts)
+    seller_cnt: Dict[str, int] = {}
+    for e in token_evts:
+        if e.evt_type != "transfer": continue
+        frm = e.tx_from; to = e.tx_to
+        if to in pair_addr_set and frm and frm not in pair_addr_set:
+            seller_cnt[frm] = seller_cnt.get(frm, 0) + 1
+    if total_sell_cnt > 0 and seller_cnt:
+        max_sell_share = max(seller_cnt.values()) / total_sell_cnt
+    else:
+        max_sell_share = 0.0
+
     return TokenFeature(
         token_addr_idx=token_idx,
         total_buy_cnt=total_buy_cnt,
@@ -439,6 +503,10 @@ def aggregate_to_token_feature(
         total_owner_sell_vol=total_owner_sell_vol,
         owner_sell_vol_ratio=owner_sell_vol_ratio,
         router_approval_rate=router_approval_rate,
+        consecutive_sell_fail_windows=consecutive_sell_fail_windows,
+        failed_sell_cnt=failed_sell_cnt,
+        liquidity_event_mask=liquidity_event_mask,
+        max_sell_share=max_sell_share,
     )
 
 # -------------------- 메인 --------------------
@@ -449,7 +517,7 @@ def main():
     OUTPUT_PATH       = BASE / "features.csv"
 
     print("="*60)
-    print("🚀 Honeypot Feature Extraction (robust pair-aware, slim) Started")
+    print("🚀 Honeypot Feature Extraction (v11, pair-aware+fallback) Started")
     print("="*60)
 
     print("\n[1/4] Loading data...")
@@ -478,12 +546,15 @@ def main():
 
     print("\n[3/4] Saving features...")
     fieldnames = [
+        # 기존 v10-slim 18개
         'token_addr_idx','total_buy_cnt','total_sell_cnt',
         'total_owner_sell_cnt','total_non_owner_sell_cnt','owner_sell_ratio','total_approval_cnt',
         'imbalance_rate','approval_to_sell_ratio',
         'total_windows','windows_with_activity',
         'total_burn_events','total_mint_events','s_owner_count',
-        'total_sell_vol','total_owner_sell_vol','owner_sell_vol_ratio','router_approval_rate'
+        'total_sell_vol','total_owner_sell_vol','owner_sell_vol_ratio','router_approval_rate',
+        # v11 신규 4개
+        'consecutive_sell_fail_windows','failed_sell_cnt','liquidity_event_mask','max_sell_share',
     ]
     with open(OUTPUT_PATH, "w", newline="", encoding="utf-8") as fp:
         w = csv.DictWriter(fp, fieldnames=fieldnames); w.writeheader()
@@ -495,13 +566,16 @@ def main():
     if feats:
         bc = [t.total_buy_cnt for t in feats]; sc = [t.total_sell_cnt for t in feats]
         orat = [t.owner_sell_ratio for t in feats]; sown = [t.s_owner_count for t in feats]
+        csf = [t.consecutive_sell_fail_windows for t in feats]; mss = [t.max_sell_share for t in feats]
         print(f"  - Buy count range: {min(bc)} ~ {max(bc)}")
         print(f"  - Sell count range: {min(sc)} ~ {max(sc)}")
         print(f"  - Owner sell ratio: {min(orat):.2f} ~ {max(orat):.2f}")
         print(f"  - Avg S_owner count: {sum(sown)/len(sown):.1f}")
+        print(f"  - Max consecutive sell-fail windows: {max(csf)}")
+        print(f"  - Max of max_sell_share: {max(mss):.2f}")
 
     print("\n" + "="*60)
-    print("✅ Feature extraction (slim) completed successfully!")
+    print("✅ Feature extraction (v11) completed successfully!")
     print("="*60)
 
 if __name__ == "__main__":
