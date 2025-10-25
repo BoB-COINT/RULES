@@ -1,29 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-generate_feature_v11.py  (pair-aware + fallback, with 4 new features)
-─────────────────────────────────────────────────────────
-허니팟 토큰 탐지를 위한 Feature 추출 스크립트 (v10-slim 확장판)
-- Transfer 기반 Buy/Sell (EOA ↔ Pair)
-- PairCreated.evt_log 에서 pairaddr 주입 (로더에서 확정)
-- pair_addr 비거나 부족 시 Transfer 패턴으로 페어 후보 추정 (폴백)
-- Approval 라우터 집계: evt_log.spender 파싱
-- S_owner: 최초 민팅 수령자 + LP 민터/버너(sender/to) + 첫번째 Approval 요청자
-
-▶ v11에서 추가된 토큰-레벨 피처
-  1) consecutive_sell_fail_windows :
-     - 정의(윈도우 기준): (buy_cnt>0) ∧ (approval_cnt>0) ∧ (non_owner_sell_cnt==0)
-     - 위 조건이 연속으로 나타난 윈도우 길이의 최댓값
-  2) failed_sell_cnt :
-     - 위 "sell-fail" 조건에 해당하는 윈도우의 총 개수
-  3) liquidity_event_mask :
-     - 전체 구간에서 한 번이라도 등장한 유동성 이벤트를 비트 마스크로 표현
-       bit0(MINT)=1, bit1(BURN)=2, bit2(SYNC)=4
-       예) MINT와 BURN만 있으면 1|2=3
-  4) max_sell_share :
-     - 전 구간에서 매도 전송(from: EOA, to: pair) 주체별 매도 건수 비율의 최댓값
-       = max_addr_sell_cnt / total_sell_cnt (분모 0이면 0.0)
-"""
 
 from __future__ import annotations
 import csv, json, re, sys
@@ -43,7 +19,7 @@ KNOWN_ROUTER_ADDRS = {
     "0xd9e1ce17f2641f24ae83637ab66a2cca9c378b9f",  # Sushi
 }
 ZERO_ADDR = "0x0000000000000000000000000000000000000000"
-WINDOW_SECONDS = 5
+WINDOW_SECONDS = 30
 DEBUG = True  # 필요시 False
 
 # -------------------- 데이터 구조 --------------------
