@@ -1,0 +1,49 @@
+rule_id: STA0401.v8.tl             # 기존 ID 유지 (파이프라인 호환 목적)
+name: Honeypot (Token-level tuned, v10 features)
+version: 2.2.0                     # 버전업: v10 스키마 대응
+source: STA0401
+detection_type: honeypot_behavior
+
+parameters:
+  # 핵심 신호(A)
+  min_imbalance_rate: 0.90              # 매수/매도 불균형(건수 기반)
+  min_approval_to_sell_ratio: 15.0      # 승인 대비 비오너 매도 희소성
+
+  # 활동 게이트(D) — run_rules.py에서 있으면 사용, 없으면 스킵
+  min_total_buy_cnt: 100
+  min_windows_with_activity: 8
+
+scoring:
+  buckets:
+    A_sell_block:
+      weight: 80.0
+      all:
+        # v10 실제 컬럼명 그대로 사용
+        - imbalance_rate >= params.min_imbalance_rate
+        - approval_to_sell_ratio >= params.min_approval_to_sell_ratio
+
+    D_activity_sanity:
+      weight: 20.0
+      all:
+        # 존재하면 적용, 없으면 run_rules.py 쪽에서 자동 스킵됨
+        - total_buy_cnt >= params.min_total_buy_cnt
+        - windows_with_activity >= params.min_windows_with_activity
+
+evidence:
+  lookback_windows: 12
+  include:
+    # 결과 JSON에 함께 노출하고 싶은 컬럼들(존재할 때만 포함됨)
+    - token_addr_idx
+    - imbalance_rate
+    - approval_to_sell_ratio
+    - total_buy_cnt
+    - windows_with_activity
+    - total_sell_cnt
+    - total_non_owner_sell_cnt
+    - router_approval_rate
+    - owner_sell_ratio
+    - owner_sell_vol_ratio
+
+validation:
+  # 판매가 있는데 매수는 극단적으로 적은 비정상 데이터 제거용(옵션)
+  min_buy_count: 1
