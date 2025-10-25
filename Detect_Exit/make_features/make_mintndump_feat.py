@@ -355,8 +355,6 @@ def finalize_window(
     holder_stats: HolderStats,
     snapshot_ts: Optional[datetime],
 ) -> Optional[Dict[str, object]]:
-    if not acc.has_activity():
-        return None
     avg_ratio: Optional[Decimal] = None
     if acc.sell_ratio_count > 0:
         avg_ratio = acc.sell_ratio_sum / Decimal(acc.sell_ratio_count)

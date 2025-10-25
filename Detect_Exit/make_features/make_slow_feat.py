@@ -138,7 +138,7 @@ def load_token_information(path: Path) -> Set[str]:
     """Load the set of token indices defined in token_information.csv."""
 
     token_indices: Set[str] = set()
-    with path.open(newline="", encoding="utf-8") as fp:
+    with path.open(newline="", encoding="utf-8-sig") as fp:
         reader = csv.DictReader(fp)
         for row in reader:
             idx_raw = (row.get("token_addr_idx") or "").strip()
@@ -150,7 +150,7 @@ def load_token_information(path: Path) -> Set[str]:
 
 def read_events(path: Path, allowed_tokens: Optional[Set[str]] = None) -> Dict[str, List[Event]]:
     events_by_token: Dict[str, List[Event]] = defaultdict(list)
-    with path.open(newline="", encoding="utf-8") as fp:
+    with path.open(newline="", encoding="utf-8-sig") as fp:
         reader = csv.DictReader(fp)
         for row in reader:
             token_idx = (row.get("token_addr_idx") or "0").strip()
