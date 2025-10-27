@@ -125,27 +125,31 @@ def longest_consecutive_ones(flags: List[int]) -> int:
 def log1p_safe(value: float) -> float:
     return math.log1p(max(0.0, value))
 
-# -------------------- 허용 토큰 로드 (추가) --------------------
-def load_allowed_token_ids(token_info_path: Path, start_idx: int = 0, end_idx: int = 3168) -> List[str]:
+# -------------------- 허용 토큰 로드 (값 기반 0~3168) --------------------
+def load_allowed_token_ids(token_info_path: Path, min_val: int = 0, max_val: int = 3168) -> List[str]:
     """
-    token_information.csv에서 행 인덱스 기준 [start_idx, end_idx] 범위의
-    token_addr_idx를 순서대로 반환.
+    token_information.csv에서 token_addr_idx '값'이 [min_val, max_val] 범위인 것만 반환.
+    값이 정수로 파싱되지 않으면 제외.
     """
     if not token_info_path.exists():
         raise FileNotFoundError(f"token_information.csv not found: {token_info_path}")
     allowed: List[str] = []
     with open(token_info_path, newline="", encoding="utf-8") as f:
         rdr = csv.DictReader(f)
-        for i, row in enumerate(rdr):
-            if i < start_idx:
+        for row in rdr:
+            raw = (row.get("token_addr_idx") or "").strip()
+            if raw == "":
                 continue
-            if i > end_idx:
-                break
-            tid = (row.get("token_addr_idx") or "").strip()
-            if tid != "":
-                allowed.append(tid)
+            # 정수로만 필터 (숫자 문자열/선행 0 허용)
+            try:
+                val = int(raw)
+            except ValueError:
+                # 숫자가 아니면 스킵 (요구사항: 값이 0~3168)
+                continue
+            if min_val <= val <= max_val:
+                allowed.append(raw)  # 원본 문자열 보존
     if DEBUG:
-        print(f"[INFO] allowed token count = {len(allowed)} (rows {start_idx}..{end_idx})")
+        print(f"[INFO] allowed token(count by value {min_val}..{max_val}) = {len(allowed)}")
     return allowed
 
 # -------------------- S_owner --------------------
@@ -159,7 +163,7 @@ def identify_s_owner(pair_events: List[PairEvent]) -> Set[str]:
                 s.add(evt.to.lower())
     return s
 
-# -------------------- 로더 (허용 목록 필터링 지원으로 수정) --------------------
+# -------------------- 로더 (허용 목록 필터 적용) --------------------
 def load_pair_events(path: Path, allowed_ids: Optional[Set[str]] = None) -> Dict[str, List[PairEvent]]:
     m: Dict[str, List[PairEvent]] = {}
     if not path.exists():
@@ -171,8 +175,8 @@ def load_pair_events(path: Path, allowed_ids: Optional[Set[str]] = None) -> Dict
         for v in allowed_ids:
             s = (v or "").strip()
             if s != "":
-                allowed_set.add(s)
-                allowed_set.add(s.lower())
+                allowed_set.add(s)          # 원본
+                allowed_set.add(s.lower())  # 소문자
 
     errs = 0
     temp: Dict[str, List[PairEvent]] = {}
@@ -183,7 +187,7 @@ def load_pair_events(path: Path, allowed_ids: Optional[Set[str]] = None) -> Dict
                 token_idx_raw = (row.get("token_addr_idx") or "").strip()
                 if allowed_set is not None:
                     if token_idx_raw not in allowed_set and token_idx_raw.lower() not in allowed_set:
-                        continue  # 허용되지 않은 토큰은 스킵
+                        continue  # 허용되지 않은 토큰 스킵
 
                 evt_type = (row.get("evt_type") or "").strip()
                 t0 = (row.get("token0") or "").strip()
@@ -529,7 +533,7 @@ def aggregate_to_token_feature(
 # -------------------- 메인 --------------------
 def main():
     BASE = Path(".")
-    TOKEN_INFO_PATH = BASE / "token_information.csv"   # ★ 추가
+    TOKEN_INFO_PATH = BASE / "token_information.csv"   # ← 값 기반 필터의 기준 CSV
     PAIR_EVENTS_PATH = BASE / "pair_evt.csv"
     OUTPUT_PATH = BASE / "features_pair_only_v6_xgboost.csv"
 
@@ -537,13 +541,13 @@ def main():
     print("🚀 Honeypot Feature Extraction (v6 for XGBoost)")
     print("=" * 60)
     print("📊 Changes:")
-    print("  - Removed: owner_sell_ratio, owner_sell_vol_ratio, sell_block_rate")
+    print("  - Filter by token_addr_idx VALUE in [0, 3168]")
     print("  - Added: log-transformed volume features")
     print("  - Optimized for XGBoost training")
     print("=" * 60)
 
-    print("\n[1/4] Loading allowed token ids from token_information.csv (rows 0..3168)...")
-    allowed_ids_list = load_allowed_token_ids(TOKEN_INFO_PATH, start_idx=0, end_idx=3168)
+    print("\n[1/4] Loading allowed token ids by VALUE (0..3168) from token_information.csv ...")
+    allowed_ids_list = load_allowed_token_ids(TOKEN_INFO_PATH, min_val=0, max_val=3168)
     allowed_ids_set = set(allowed_ids_list + [s.lower() for s in allowed_ids_list])
 
     print("\n[2/4] Loading pair events (filtered by allowed ids)...")
@@ -551,7 +555,7 @@ def main():
 
     # token_information.csv 순서를 가능한 보존
     all_token_ids = [tid for tid in allowed_ids_list if (tid in pair_events or tid.lower() in pair_events)]
-    print(f"  ✅ Loaded {len(all_token_ids)} tokens (filtered)")
+    print(f"  ✅ Loaded {len(all_token_ids)} tokens (filtered by value 0..3168)")
 
     print("\n[3/4] Generating features...")
     feats: List[TokenFeature] = []
