@@ -126,7 +126,7 @@ def log1p_safe(value: float) -> float:
     return math.log1p(max(0.0, value))
 
 # -------------------- 허용 토큰 로드 (값 기반 0~3168) --------------------
-def load_allowed_token_ids(token_info_path: Path, min_val: int = 0, max_val: int = 3168) -> List[str]:
+def load_allowed_token_ids(token_info_path: Path, min_val: int = 3169, max_val: int = 5437) -> List[str]:
     """
     token_information.csv에서 token_addr_idx '값'이 [min_val, max_val] 범위인 것만 반환.
     값이 정수로 파싱되지 않으면 제외.
