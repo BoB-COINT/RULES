@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, getcontext
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+import math
 
 getcontext().prec = 28
 
@@ -62,7 +63,6 @@ class TokenFeature:
     total_sell_cnt: int
     total_owner_sell_cnt: int
     total_non_owner_sell_cnt: int
-    owner_sell_ratio: float
     imbalance_rate: float
     total_windows: int
     windows_with_activity: int
@@ -72,14 +72,15 @@ class TokenFeature:
     total_sell_vol: float
     total_buy_vol: float
     total_owner_sell_vol: float
-    owner_sell_vol_ratio: float
+    total_sell_vol_log: float  # 로그 변환 추가
+    total_buy_vol_log: float   # 로그 변환 추가
+    total_owner_sell_vol_log: float  # 로그 변환 추가
     liquidity_event_mask: int
     max_sell_share: float
     unique_sellers: int
     unique_buyers: int
     consecutive_sell_block_windows: int
     total_sell_block_windows: int
-    sell_block_rate: float
 
 # -------------------- 유틸 --------------------
 def parse_iso(v: str) -> datetime:
@@ -112,6 +113,10 @@ def longest_consecutive_ones(flags: List[int]) -> int:
         else:
             cur = 0
     return best
+
+def log1p_safe(value: float) -> float:
+    """안전한 log1p 변환 (음수 방지)"""
+    return math.log1p(max(0.0, value))
 
 # -------------------- S_owner --------------------
 def identify_s_owner(pair_events: List[PairEvent]) -> Set[str]:
@@ -209,31 +214,32 @@ def load_pair_events(path: Path) -> Dict[str, List[PairEvent]]:
                             target_addr = e.token0
                         elif e.reserve1 > e.reserve0 * 100:
                             target_addr = e.token1
-                        else:
-                            target_addr = e.token0
-                    else:
-                        target_addr = e.token0
-                break
+                if target_addr:
+                    break
         
         for e in evts:
             e.target_token_addr = target_addr
         
-        m[token_idx] = evts
-        
-        if DEBUG and target_addr:
-            is_token0 = (target_addr == evts[0].token0) if evts[0].token0 else None
-            print(f"[INFO] token_idx={token_idx} -> {target_addr} (is_token0={is_token0})")
+        m[token_idx] = sorted(evts, key=lambda x: x.timestamp)
     
     return m
 
-# -------------------- Swap 방향 판단 --------------------
+# -------------------- Swap 방향 --------------------
 def determine_swap_direction(evt: PairEvent) -> Tuple[str, Optional[Decimal]]:
-    """Swap 이벤트에서 매수/매도 판단"""
-    
+    """
+    Returns: ("buy"|"sell"|"unknown", volume_in_target_token)
+    """
     if evt.evt_type.lower() != "swap":
         return ("unknown", None)
     
-    if not evt.target_token_addr or not evt.token0 or not evt.token1:
+    target = evt.target_token_addr
+    if not target:
+        return ("unknown", None)
+    
+    t0 = evt.token0
+    t1 = evt.token1
+    
+    if not t0 or not t1:
         return ("unknown", None)
     
     a0_in = evt.amount0_in or Decimal(0)
@@ -241,111 +247,117 @@ def determine_swap_direction(evt: PairEvent) -> Tuple[str, Optional[Decimal]]:
     a0_out = evt.amount0_out or Decimal(0)
     a1_out = evt.amount1_out or Decimal(0)
     
-    target = evt.target_token_addr.lower()
+    target = target.lower()
+    t0 = t0.lower()
+    t1 = t1.lower()
     
-    # target이 token0인 경우
-    if target == evt.token0.lower():
-        if a0_out > 0:
-            return ("buy", a0_out)
-        elif a0_in > 0:
+    if target == t0:
+        # target이 token0
+        if a0_in > 0:
+            # target을 pair에 넣음 → 판매
             return ("sell", a0_in)
-    
-    # target이 token1인 경우
-    elif target == evt.token1.lower():
-        if a1_out > 0:
-            return ("buy", a1_out)
-        elif a1_in > 0:
+        elif a0_out > 0:
+            # target을 pair에서 받음 → 구매
+            return ("buy", a0_out)
+    elif target == t1:
+        # target이 token1
+        if a1_in > 0:
             return ("sell", a1_in)
+        elif a1_out > 0:
+            return ("buy", a1_out)
     
     return ("unknown", None)
 
-# -------------------- 윈도우 집계 --------------------
+# -------------------- 윈도우 생성 --------------------
 def generate_window_features(
-    pair_evts: List[PairEvent],
+    events: List[PairEvent],
     window_seconds: int,
     s_owner: Set[str],
-    token_id_for_log: str = "?"
+    token_id_for_log: str = "",
 ) -> List[WindowFeature]:
     
-    if not pair_evts:
+    if not events:
         return []
     
-    pair_evts_sorted = sorted(pair_evts, key=lambda e: e.timestamp)
+    first_ts = events[0].timestamp
+    last_ts = events[-1].timestamp
     
-    first_ts = pair_evts_sorted[0].timestamp
-    last_ts = pair_evts_sorted[-1].timestamp
-    cur = floor_to_window(first_ts, window_seconds)
-    last_win = floor_to_window(last_ts, window_seconds)
-    delta = timedelta(seconds=window_seconds)
+    start_window = floor_to_window(first_ts, window_seconds)
+    end_window = floor_to_window(last_ts, window_seconds)
     
-    result: List[WindowFeature] = []
+    # 모든 윈도우 생성
+    all_windows = []
+    cur = start_window
+    while cur <= end_window:
+        all_windows.append(cur)
+        cur += timedelta(seconds=window_seconds)
     
-    while cur <= last_win:
-        nxt = cur + delta
-        win_events = [e for e in pair_evts_sorted if cur <= e.timestamp < nxt]
+    # 이벤트를 윈도우별로 그룹화
+    window_events: Dict[datetime, List[PairEvent]] = {w: [] for w in all_windows}
+    for e in events:
+        w = floor_to_window(e.timestamp, window_seconds)
+        if w in window_events:
+            window_events[w].append(e)
+    
+    result = []
+    
+    for win_ts in all_windows:
+        win_evts = window_events[win_ts]
         
-        if not win_events:
-            cur = nxt
-            continue
-        
-        buy_cnt = sell_cnt = owner_sell_cnt = 0
-        non_owner_sell_cnt = 0
+        buy_cnt = 0
+        sell_cnt = 0
+        owner_sell_cnt = 0
         owner_sell_vol = Decimal(0)
+        non_owner_sell_cnt = 0
+        
         buy_vol = Decimal(0)
         sell_vol = Decimal(0)
-        sellers: Set[str] = set()
-        buyers: Set[str] = set()
-        owner_sellers: Set[str] = set()
+        
+        sellers = set()
+        buyers = set()
+        owner_sellers = set()
         
         burn_events = 0
         mint_events = 0
         sync_events = 0
         swap_events = 0
         
-        for e in win_events:
+        for e in win_evts:
             evt_lower = e.evt_type.lower()
             
             if evt_lower == "swap":
                 swap_events += 1
-                direction, volume = determine_swap_direction(e)
+                direction, vol = determine_swap_direction(e)
                 
                 if direction == "buy":
                     buy_cnt += 1
-                    if volume:
-                        buy_vol += volume
-                    if e.to:
-                        buyers.add(e.to.lower())
-                        
+                    if vol: buy_vol += vol
+                    if e.to: buyers.add(e.to.lower())
+                
                 elif direction == "sell":
                     sell_cnt += 1
-                    if volume:
-                        sell_vol += volume
+                    if vol: sell_vol += vol
                     
-                    seller = (e.sender or "").lower()
-                    if seller:
-                        sellers.add(seller)
+                    if e.sender:
+                        sender_lower = e.sender.lower()
+                        sellers.add(sender_lower)
                         
-                        if seller in s_owner:
+                        if sender_lower in s_owner:
                             owner_sell_cnt += 1
-                            if volume:
-                                owner_sell_vol += volume
-                            owner_sellers.add(seller)
+                            if vol: owner_sell_vol += vol
+                            owner_sellers.add(sender_lower)
                         else:
                             non_owner_sell_cnt += 1
             
-            elif evt_lower == "burn":
-                burn_events += 1
             elif evt_lower == "mint":
                 mint_events += 1
+            elif evt_lower == "burn":
+                burn_events += 1
             elif evt_lower == "sync":
                 sync_events += 1
         
-        sell_block_flag = 1 if (
-            buy_cnt > 0 and
-            owner_sell_cnt > 0 and
-            non_owner_sell_cnt == 0 and
-            len(buyers) >= 2
-        ) else 0
+        # sell_block_flag: 판매만 있고 구매가 없으면 1
+        sell_block_flag = 1 if (sell_cnt > 0 and buy_cnt == 0) else 0
         
         result.append(WindowFeature(
             buy_cnt=buy_cnt,
@@ -364,7 +376,6 @@ def generate_window_features(
             swap_events=swap_events,
             sell_block_flag=sell_block_flag,
         ))
-        cur = nxt
     
     if DEBUG:
         tb = sum(w.buy_cnt for w in result)
@@ -387,8 +398,7 @@ def aggregate_to_token_feature(
     total_owner_sell_cnt = sum(w.owner_sell_cnt for w in windows)
     total_non_owner_sell_cnt = sum(w.non_owner_sell_cnt for w in windows)
     
-    owner_sell_ratio = (total_owner_sell_cnt / total_sell_cnt) if total_sell_cnt > 0 else 0.0
-    
+    # imbalance_rate 계산
     imb_vals = []
     for w in windows:
         d = w.buy_cnt + w.sell_cnt
@@ -402,6 +412,7 @@ def aggregate_to_token_feature(
     total_burn_events = sum(w.burn_events for w in windows)
     total_mint_events = sum(w.mint_events for w in windows)
     
+    # 볼륨 계산 (원시값)
     total_sell_vol_dec = sum((w.sell_vol for w in windows), start=Decimal(0))
     total_buy_vol_dec = sum((w.buy_vol for w in windows), start=Decimal(0))
     total_owner_sell_vol_dec = sum((w.owner_sell_vol for w in windows), start=Decimal(0))
@@ -410,10 +421,12 @@ def aggregate_to_token_feature(
     total_buy_vol = float(total_buy_vol_dec)
     total_owner_sell_vol = float(total_owner_sell_vol_dec)
     
-    owner_sell_vol_ratio = float(
-        (total_owner_sell_vol_dec / total_sell_vol_dec) if total_sell_vol_dec > 0 else 0
-    )
+    # 로그 변환 (XGBoost를 위한 스케일 조정)
+    total_sell_vol_log = log1p_safe(total_sell_vol)
+    total_buy_vol_log = log1p_safe(total_buy_vol)
+    total_owner_sell_vol_log = log1p_safe(total_owner_sell_vol)
     
+    # liquidity_event_mask
     liquidity_event_mask = 0
     if total_mint_events > 0:
         liquidity_event_mask |= 1
@@ -422,6 +435,7 @@ def aggregate_to_token_feature(
     if sum(w.sync_events for w in windows) > 0:
         liquidity_event_mask |= 4
     
+    # max_sell_share 계산
     seller_cnt: Dict[str, int] = {}
     for e in pair_evts:
         if e.evt_type.lower() == "swap" and e.sender:
@@ -435,6 +449,7 @@ def aggregate_to_token_feature(
     else:
         max_sell_share = 0.0
     
+    # unique sellers/buyers
     all_sellers = set()
     all_buyers = set()
     for e in pair_evts:
@@ -445,10 +460,10 @@ def aggregate_to_token_feature(
             elif direction == "buy" and e.to:
                 all_buyers.add(e.to.lower())
     
+    # sell_block 관련
     sell_block_flags = [w.sell_block_flag for w in windows]
     consecutive_sell_block_windows = longest_consecutive_ones(sell_block_flags)
     total_sell_block_windows = sum(sell_block_flags)
-    sell_block_rate = total_sell_block_windows / total_windows if total_windows > 0 else 0.0
     
     return TokenFeature(
         token_addr_idx=token_idx,
@@ -456,7 +471,6 @@ def aggregate_to_token_feature(
         total_sell_cnt=total_sell_cnt,
         total_owner_sell_cnt=total_owner_sell_cnt,
         total_non_owner_sell_cnt=total_non_owner_sell_cnt,
-        owner_sell_ratio=owner_sell_ratio,
         imbalance_rate=imbalance_rate,
         total_windows=total_windows,
         windows_with_activity=windows_with_activity,
@@ -466,24 +480,30 @@ def aggregate_to_token_feature(
         total_sell_vol=total_sell_vol,
         total_buy_vol=total_buy_vol,
         total_owner_sell_vol=total_owner_sell_vol,
-        owner_sell_vol_ratio=owner_sell_vol_ratio,
+        total_sell_vol_log=total_sell_vol_log,
+        total_buy_vol_log=total_buy_vol_log,
+        total_owner_sell_vol_log=total_owner_sell_vol_log,
         liquidity_event_mask=liquidity_event_mask,
         max_sell_share=max_sell_share,
         unique_sellers=len(all_sellers),
         unique_buyers=len(all_buyers),
         consecutive_sell_block_windows=consecutive_sell_block_windows,
         total_sell_block_windows=total_sell_block_windows,
-        sell_block_rate=sell_block_rate,
     )
 
 # -------------------- 메인 --------------------
 def main():
     BASE = Path(".")
     PAIR_EVENTS_PATH = BASE / "pair_evt.csv"
-    OUTPUT_PATH = BASE / "features_pair_only_v5.csv"
+    OUTPUT_PATH = BASE / "features_pair_only_v6_xgboost.csv"
     
     print("=" * 60)
-    print("🚀 Honeypot Feature Extraction (Pair-Only v5 FINAL)")
+    print("🚀 Honeypot Feature Extraction (v6 for XGBoost)")
+    print("=" * 60)
+    print("📊 Changes:")
+    print("  - Removed: owner_sell_ratio, owner_sell_vol_ratio, sell_block_rate")
+    print("  - Added: log-transformed volume features")
+    print("  - Optimized for XGBoost training")
     print("=" * 60)
     
     print("\n[1/4] Loading data...")
@@ -511,17 +531,29 @@ def main():
     
     print("\n[3/4] Saving features...")
     fieldnames = [
-        'token_addr_idx', 'total_buy_cnt', 'total_sell_cnt',
-        'total_owner_sell_cnt', 'total_non_owner_sell_cnt',
-        'owner_sell_ratio', 'imbalance_rate',
-        'total_windows', 'windows_with_activity',
-        'total_burn_events', 'total_mint_events',
-        's_owner_count', 'total_sell_vol', 'total_buy_vol',
-        'total_owner_sell_vol', 'owner_sell_vol_ratio',
-        'liquidity_event_mask', 'max_sell_share',
-        'unique_sellers', 'unique_buyers',
+        'token_addr_idx', 
+        'total_buy_cnt', 
+        'total_sell_cnt',
+        'total_owner_sell_cnt', 
+        'total_non_owner_sell_cnt',
+        'imbalance_rate',
+        'total_windows', 
+        'windows_with_activity',
+        'total_burn_events', 
+        'total_mint_events',
+        's_owner_count', 
+        'total_sell_vol', 
+        'total_buy_vol',
+        'total_owner_sell_vol',
+        'total_sell_vol_log',      # 로그 변환 추가
+        'total_buy_vol_log',        # 로그 변환 추가
+        'total_owner_sell_vol_log', # 로그 변환 추가
+        'liquidity_event_mask', 
+        'max_sell_share',
+        'unique_sellers', 
+        'unique_buyers',
         'consecutive_sell_block_windows',
-        'total_sell_block_windows', 'sell_block_rate',
+        'total_sell_block_windows',
     ]
     
     with open(OUTPUT_PATH, "w", newline="", encoding="utf-8") as fp:
@@ -537,22 +569,24 @@ def main():
     if feats:
         bc = [t.total_buy_cnt for t in feats]
         sc = [t.total_sell_cnt for t in feats]
-        orat = [t.owner_sell_ratio for t in feats]
         sown = [t.s_owner_count for t in feats]
         mss = [t.max_sell_share for t in feats]
         csb = [t.consecutive_sell_block_windows for t in feats]
-        sbr = [t.sell_block_rate for t in feats]
+        
+        sv_log = [t.total_sell_vol_log for t in feats]
+        bv_log = [t.total_buy_vol_log for t in feats]
         
         print(f"  - Buy count range: {min(bc)} ~ {max(bc)}")
         print(f"  - Sell count range: {min(sc)} ~ {max(sc)}")
-        print(f"  - Owner sell ratio: {min(orat):.2f} ~ {max(orat):.2f}")
         print(f"  - Avg S_owner count: {sum(sown)/len(sown):.1f}")
         print(f"  - Max of max_sell_share: {max(mss):.2f}")
         print(f"  - Max consecutive sell-block windows: {max(csb)}")
-        print(f"  - Avg sell_block_rate: {sum(sbr)/len(sbr):.3f}")
+        print(f"  - Sell volume (log) range: {min(sv_log):.2f} ~ {max(sv_log):.2f}")
+        print(f"  - Buy volume (log) range: {min(bv_log):.2f} ~ {max(bv_log):.2f}")
     
     print("\n" + "=" * 60)
     print("✅ Feature extraction completed successfully!")
+    print("💡 Tip: Use log-transformed volume features for better XGBoost performance")
     print("=" * 60)
 
 if __name__ == "__main__":
